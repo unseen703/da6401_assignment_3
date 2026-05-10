@@ -494,12 +494,15 @@ class MultiHeadAttention(nn.Module):
         attention_output = self.attention(Q, K, V, mask=mask)
         if isinstance(attention_output, tuple):
             context, _ = attention_output
+            print("MultiHeadAttention weights:", _)
         else:
             context = attention_output
-        print("MultiHeadAttention mask :", mask)
+
+        print("MultiHeadAttention mask :", context)
 
         output = self._merge_heads(context)       # [B, T_q, d_model]
         output = self.W_o(output)
+        
         print("MultiHeadAttention output:", output)
         return output
 
