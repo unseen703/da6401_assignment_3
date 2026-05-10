@@ -1,0 +1,9 @@
+torch
+torchtext
+datasets
+spacy
+wandb
+matplotlib
+numpy
+tqdm
+sacrebleu
