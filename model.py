@@ -116,7 +116,7 @@ class ScaledDotProductAttention(nn.Module):
 
         attn_w = F.softmax(scores, dim=-1)
         self.attn_w = attn_w.detach()
-        print("Attention weights (after softmax):", self.attn_w.shape)
+        print("Attention weights (after softmax):", self.attn_w)
         attn_w = self.dropout(attn_w)
 
         output = torch.matmul(attn_w, v)          # [B, H, T_q, d_v]
@@ -497,10 +497,10 @@ class MultiHeadAttention(nn.Module):
         else:
             context = attention_output
         print("MultiHeadAttention mask :", mask)
-        print("MultiHeadAttention output:", output)
 
         output = self._merge_heads(context)       # [B, T_q, d_model]
         output = self.W_o(output)
+        print("MultiHeadAttention output:", output)
         return output
 
 
