@@ -276,7 +276,7 @@ def greedy_decode(
 
     with torch.no_grad():
         # ── Encode source (done once) ──────────────────────────────────
-        enc_out, _ = model.encode(src, src_mask)    # [1, src_len, d_model]
+        enc_out = model.encode(src, src_mask)    # [1, src_len, d_model]
 
         # ── Initialise decoder input with <sos> ───────────────────────
         ys = torch.tensor([[start_symbol]], dtype=torch.long, device=device)
@@ -286,7 +286,7 @@ def greedy_decode(
             tgt_mask = make_tgt_mask(ys).to(device)
 
             # One decoder forward step
-            dec_out, _, _ = model.decode(ys, enc_out, src_mask, tgt_mask)
+            dec_out = model.decode(ys, enc_out, src_mask, tgt_mask)
             # dec_out : [1, cur_len, d_model]
 
             # Project to vocab and pick greedy argmax at last position
@@ -685,12 +685,56 @@ def log_attention_maps(
     src = src.to(device)
     src_mask = make_src_mask(src).to(device)
 
-    with torch.no_grad():
-        _, all_enc_attn = model.encode(src, src_mask)
+    encoder_layers = model.encoder.layers
+    if not encoder_layers:
+        print("  Attention maps skipped: encoder has no layers.")
+        return
 
-    # Pick the requested layer
-    attn = all_enc_attn[layer_idx]          # [1, H, src_len, src_len]
-    attn = attn.squeeze(0).cpu().numpy()    # [H, src_len, src_len]
+    resolved_layer_idx = layer_idx if layer_idx >= 0 else len(encoder_layers) + layer_idx
+    if resolved_layer_idx < 0 or resolved_layer_idx >= len(encoder_layers):
+        print(f"  Attention maps skipped: layer_idx={layer_idx} is out of range.")
+        return
+
+    target_attn = encoder_layers[resolved_layer_idx].self_attn
+    captured_attn = {}
+
+    def capture_attention(_module, inputs, kwargs, _output):
+        q, k, _v = inputs[:3]
+        mask = kwargs.get("mask", inputs[3] if len(inputs) > 3 else None)
+        d_k = q.size(-1)
+
+        if target_attn.attention.__class__.__name__ == "RotaryAttention":
+            q = target_attn.attention.rope(q)
+            k = target_attn.attention.rope(k)
+
+        scores = torch.matmul(q, k.transpose(-2, -1))
+
+        if target_attn.attention.__class__.__name__ == "RelativePositionAttention":
+            T_q, T_k = q.size(2), k.size(2)
+            rel_idx = target_attn.attention._relative_position_indices(T_q, T_k, q.device)
+            rel_bias = target_attn.attention.rel_emb(rel_idx)
+            rel_scores = torch.einsum("bhqd,qkd->bhqk", q, rel_bias)
+            scores = scores + rel_scores
+
+        scores = scores / math.sqrt(d_k)
+
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, float("-inf"))
+
+        captured_attn["weights"] = F.softmax(scores, dim=-1).detach()
+
+    hook = target_attn.attention.register_forward_hook(capture_attention, with_kwargs=True)
+    try:
+        with torch.no_grad():
+            model.encode(src, src_mask)
+    finally:
+        hook.remove()
+
+    if "weights" not in captured_attn:
+        print("  Attention maps skipped: no attention weights were captured.")
+        return
+
+    attn = captured_attn["weights"].squeeze(0).cpu().numpy()    # [H, src_len, src_len]
     H    = attn.shape[0]
 
     # Decode token labels for axis ticks
@@ -714,7 +758,7 @@ def log_attention_maps(
         ax.set_yticklabels(src_tokens, fontsize=7)
         plt.colorbar(im, ax=ax, fraction=0.046)
 
-    plt.suptitle(f"Encoder Layer {layer_idx} — Attention Heads", fontsize=11)
+    plt.suptitle(f"Encoder Layer {resolved_layer_idx} — Attention Heads", fontsize=11)
     plt.tight_layout()
 
     if wandb.run is not None:
@@ -972,7 +1016,7 @@ def run_ablation_no_scaling() -> None:
         if mask is not None:
             scores = scores.masked_fill(mask == 0, float("-inf"))
         attn_w = torch.nn.functional.softmax(scores, dim=-1)
-        return torch.matmul(attn_w, v), attn_w
+        return torch.matmul(attn_w, v)
 
     model_module.ScaledDotProductAttention.forward = unscaled_forward
     print("⚠ Attention scaling DISABLED for ablation.")

@@ -20,7 +20,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -94,11 +94,10 @@ class ScaledDotProductAttention(nn.Module):
         k: torch.Tensor,          # [B, H, T_k, d_k]
         v: torch.Tensor,          # [B, H, T_k, d_v]
         mask: Optional[torch.Tensor] = None,  # broadcastable to [B, H, T_q, T_k]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Returns:
-            output   : [B, H, T_q, d_v]
-            attn_w   : [B, H, T_q, T_k]  (attention weight matrix)
+            output : [B, H, T_q, d_v]
         """
         d_k   = q.size(-1)
         scale = math.sqrt(d_k)
@@ -114,7 +113,7 @@ class ScaledDotProductAttention(nn.Module):
         attn_w = self.dropout(attn_w)
 
         output = torch.matmul(attn_w, v)          # [B, H, T_q, d_v]
-        return output, attn_w
+        return output
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -180,7 +179,7 @@ class RelativePositionAttention(nn.Module):
         k:    torch.Tensor,
         v:    torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         B, H, T_q, d_k = q.shape
         _, _, T_k, _   = k.shape
         scale          = math.sqrt(d_k)
@@ -205,7 +204,7 @@ class RelativePositionAttention(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.dropout(attn_w)
         output = torch.matmul(attn_w, v)
-        return output, attn_w
+        return output
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -285,7 +284,7 @@ class RotaryAttention(nn.Module):
         k:    torch.Tensor,
         v:    torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         d_k = q.size(-1)
 
         # Apply RoPE rotation to queries and keys
@@ -300,7 +299,7 @@ class RotaryAttention(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.dropout(attn_w)
         output = torch.matmul(attn_w, v)
-        return output, attn_w
+        return output
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -344,9 +343,9 @@ class LinearAttention(nn.Module):
         k:    torch.Tensor,
         v:    torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
-        Args / Returns: same signature as ScaledDotProductAttention.
+        Args / Returns: same tensor-output signature as ScaledDotProductAttention.
 
         Note: Linear attention does not natively support causal masking
         in a single O(n d²) pass; here we apply it via softmax on the
@@ -378,14 +377,8 @@ class LinearAttention(nn.Module):
         # Output: φ(Q) S / Z : [B, H, T_q, d_v]
         output = torch.einsum("bhqd,bhdm->bhqm", q, kv) / denom
 
-        # Produce approximate attention weights for visualisation
-        # (not used in the forward pass, only for inspection)
-        with torch.no_grad():
-            attn_w = torch.einsum("bhnd,bhmd->bhnm", q, k)
-            attn_w = attn_w / (denom + self.eps)
-
         output = self.dropout(output)
-        return output, attn_w
+        return output
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -470,7 +463,7 @@ class MultiHeadAttention(nn.Module):
         key:    torch.Tensor,
         value:  torch.Tensor,
         mask:   Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Args:
             query  : [B, T_q, d_model]
@@ -480,17 +473,16 @@ class MultiHeadAttention(nn.Module):
 
         Returns:
             output : [B, T_q, d_model]
-            attn_w : [B, H, T_q, T_k]
         """
         Q = self._split_heads(self.W_q(query))   # [B, H, T_q, d_k]
         K = self._split_heads(self.W_k(key))     # [B, H, T_k, d_k]
         V = self._split_heads(self.W_v(value))   # [B, H, T_k, d_k]
 
-        context, attn_w = self.attention(Q, K, V, mask=mask)
+        context = self.attention(Q, K, V, mask=mask)
 
         output = self._merge_heads(context)       # [B, T_q, d_model]
         output = self.W_o(output)
-        return output, attn_w
+        return output
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -628,23 +620,20 @@ class EncoderLayer(nn.Module):
         self,
         x:        torch.Tensor,
         src_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Args:
             x        : [B, src_len, d_model]
             src_mask : [B, 1, 1, src_len]
 
         Returns:
-            x      : [B, src_len, d_model]
-            attn_w : [B, H, src_len, src_len]
+            x : [B, src_len, d_model]
         """
-        x, attn_w = self.norm1(
-            x, lambda z: self.self_attn(z, z, z, mask=src_mask)[0]
-        ), self.self_attn(x, x, x, mask=src_mask)[1]
-        # Note: calling self_attn twice is redundant but keeps sublayer API clean.
-        # Production code would cache the result.
+        x = self.norm1(
+            x, lambda z: self.self_attn(z, z, z, mask=src_mask)
+        )
         x = self.norm2(x, self.ff)
-        return x, attn_w
+        return x
 
 
 class Encoder(nn.Module):
@@ -675,25 +664,23 @@ class Encoder(nn.Module):
         self,
         src:      torch.Tensor,
         src_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, list]:
+    ) -> torch.Tensor:
         """
         Args:
             src      : [B, src_len]
             src_mask : [B, 1, 1, src_len]
 
         Returns:
-            enc_out    : [B, src_len, d_model]
-            all_attn_w : list of attention weights from each layer
+            enc_out : [B, src_len, d_model]
         """
         # Scale embeddings before adding positional encoding (paper Section 3.4)
         x = self.pos_enc(self.embedding(src) * self.scale)
 
-        all_attn_w = []
         for layer in self.layers:
-            x, attn_w = layer(x, src_mask)
-            all_attn_w.append(attn_w)
+            x = layer(x, src_mask)
 
-        return x, all_attn_w
+
+        return x
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -740,28 +727,25 @@ class DecoderLayer(nn.Module):
         enc_out:  torch.Tensor,
         src_mask: Optional[torch.Tensor] = None,
         tgt_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Returns:
-            x             : [B, tgt_len, d_model]
-            self_attn_w   : [B, H, tgt_len, tgt_len]
-            cross_attn_w  : [B, H, tgt_len, src_len]
+            x : [B, tgt_len, d_model]
         """
         # 1. Masked self-attention
         x = self.norm1(
-            x, lambda z: self.self_attn(z, z, z, mask=tgt_mask)[0]
+            x, lambda z: self.self_attn(z, z, z, mask=tgt_mask)
         )
-        self_attn_w = self.self_attn(x, x, x, mask=tgt_mask)[1]
+ 
 
         # 2. Cross-attention: query from decoder, key/value from encoder
         x = self.norm2(
-            x, lambda z: self.cross_attn(z, enc_out, enc_out, mask=src_mask)[0]
+            x, lambda z: self.cross_attn(z, enc_out, enc_out, mask=src_mask)
         )
-        cross_attn_w = self.cross_attn(x, enc_out, enc_out, mask=src_mask)[1]
 
         # 3. Feed-forward
         x = self.norm3(x, self.ff)
-        return x, self_attn_w, cross_attn_w
+        return x
 
 
 class Decoder(nn.Module):
@@ -794,17 +778,15 @@ class Decoder(nn.Module):
         enc_out:  torch.Tensor,
         src_mask: Optional[torch.Tensor] = None,
         tgt_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, list, list]:
+    ) -> torch.Tensor:
         x = self.pos_enc(self.embedding(tgt) * self.scale)
 
-        all_self_attn  = []
-        all_cross_attn = []
-        for layer in self.layers:
-            x, self_attn_w, cross_attn_w = layer(x, enc_out, src_mask, tgt_mask)
-            all_self_attn.append(self_attn_w)
-            all_cross_attn.append(cross_attn_w)
 
-        return x, all_self_attn, all_cross_attn
+        for layer in self.layers:
+            x = layer(x, enc_out, src_mask, tgt_mask)
+
+
+        return x
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -878,7 +860,7 @@ class Transformer(nn.Module):
         self,
         src:      torch.Tensor,
         src_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, list]:
+    ) -> torch.Tensor:
         return self.encoder(src, src_mask)
 
     def decode(
@@ -887,7 +869,7 @@ class Transformer(nn.Module):
         enc_out:  torch.Tensor,
         src_mask: torch.Tensor,
         tgt_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, list, list]:
+    ) -> torch.Tensor:
         return self.decoder(tgt, enc_out, src_mask, tgt_mask)
 
     # ------------------------------------------------------------------
@@ -915,8 +897,8 @@ class Transformer(nn.Module):
         if tgt_mask is None:
             tgt_mask = make_tgt_mask(tgt)
 
-        enc_out, _  = self.encode(src, src_mask)
-        dec_out, _, _ = self.decode(tgt, enc_out, src_mask, tgt_mask)
+        enc_out = self.encode(src, src_mask)
+        dec_out = self.decode(tgt, enc_out, src_mask, tgt_mask)
         logits = self.output_proj(dec_out)    # [B, tgt_len, vocab]
         return logits
 
