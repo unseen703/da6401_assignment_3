@@ -20,7 +20,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Tuple
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -67,6 +67,7 @@ def make_tgt_mask(tgt: torch.Tensor) -> torch.Tensor:
 
     # Combine: both conditions must hold
     mask = pad_mask & causal.unsqueeze(0).unsqueeze(0)  # [B, 1, T, T]
+
     return mask
 
 
@@ -87,6 +88,7 @@ class ScaledDotProductAttention(nn.Module):
     def __init__(self, dropout: float = 0.0) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
+        self.attn_w: Optional[torch.Tensor] = None
 
     def forward(
         self,
@@ -94,10 +96,11 @@ class ScaledDotProductAttention(nn.Module):
         k: torch.Tensor,          # [B, H, T_k, d_k]
         v: torch.Tensor,          # [B, H, T_k, d_v]
         mask: Optional[torch.Tensor] = None,  # broadcastable to [B, H, T_q, T_k]
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             output : [B, H, T_q, d_v]
+            attn_w : [B, H, T_q, T_k]
         """
         d_k   = q.size(-1)
         scale = math.sqrt(d_k)
@@ -107,13 +110,17 @@ class ScaledDotProductAttention(nn.Module):
 
         if mask is not None:
             # Mask = 0 → set score to −∞ so softmax output ≈ 0
-            scores = scores.masked_fill(mask == 0, float("-inf"))
+            scores = scores.masked_fill(mask == False, float("-inf"))
+
 
         attn_w = F.softmax(scores, dim=-1)
+        self.attn_w = attn_w.detach()
+        print("Attention weights (after softmax):", self.attn_w.shape)
         attn_w = self.dropout(attn_w)
 
         output = torch.matmul(attn_w, v)          # [B, H, T_q, d_v]
-        return output
+
+        return output, self.attn_w
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -155,6 +162,7 @@ class RelativePositionAttention(nn.Module):
         self.d_k          = d_k
         self.max_rel_dist = max_rel_dist
         self.dropout      = nn.Dropout(dropout)
+        self.attn_w       = None
 
         # Embeddings for all relative positions in [−max, +max]
         # Total positions = 2 * max_rel_dist + 1
@@ -179,7 +187,7 @@ class RelativePositionAttention(nn.Module):
         k:    torch.Tensor,
         v:    torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         B, H, T_q, d_k = q.shape
         _, _, T_k, _   = k.shape
         scale          = math.sqrt(d_k)
@@ -202,9 +210,10 @@ class RelativePositionAttention(nn.Module):
             scores = scores.masked_fill(mask == 0, float("-inf"))
 
         attn_w = F.softmax(scores, dim=-1)
+        self.attn_w = attn_w.detach()
         attn_w = self.dropout(attn_w)
         output = torch.matmul(attn_w, v)
-        return output
+        return output, self.attn_w
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -277,6 +286,7 @@ class RotaryAttention(nn.Module):
         super().__init__()
         self.rope    = RotaryEmbedding(d_k, max_seq_len)
         self.dropout = nn.Dropout(dropout)
+        self.attn_w  = None
 
     def forward(
         self,
@@ -284,7 +294,7 @@ class RotaryAttention(nn.Module):
         k:    torch.Tensor,
         v:    torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         d_k = q.size(-1)
 
         # Apply RoPE rotation to queries and keys
@@ -297,9 +307,10 @@ class RotaryAttention(nn.Module):
             scores = scores.masked_fill(mask == 0, float("-inf"))
 
         attn_w = F.softmax(scores, dim=-1)
+        self.attn_w = attn_w.detach()
         attn_w = self.dropout(attn_w)
         output = torch.matmul(attn_w, v)
-        return output
+        return output, self.attn_w
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -331,6 +342,7 @@ class LinearAttention(nn.Module):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.eps     = eps
+        self.attn_w  = None
 
     @staticmethod
     def _feature_map(x: torch.Tensor) -> torch.Tensor:
@@ -343,7 +355,7 @@ class LinearAttention(nn.Module):
         k:    torch.Tensor,
         v:    torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args / Returns: same tensor-output signature as ScaledDotProductAttention.
 
@@ -378,7 +390,7 @@ class LinearAttention(nn.Module):
         output = torch.einsum("bhqd,bhdm->bhqm", q, kv) / denom
 
         output = self.dropout(output)
-        return output
+        return output, self.attn_w
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -478,7 +490,11 @@ class MultiHeadAttention(nn.Module):
         K = self._split_heads(self.W_k(key))     # [B, H, T_k, d_k]
         V = self._split_heads(self.W_v(value))   # [B, H, T_k, d_k]
 
-        context = self.attention(Q, K, V, mask=mask)
+        attention_output = self.attention(Q, K, V, mask=mask)
+        if isinstance(attention_output, tuple):
+            context, _ = attention_output
+        else:
+            context = attention_output
 
         output = self._merge_heads(context)       # [B, T_q, d_model]
         output = self.W_o(output)
