@@ -498,6 +498,7 @@ class MultiHeadAttention(nn.Module):
 
         output = self._merge_heads(context)       # [B, T_q, d_model]
         output = self.W_o(output)
+        print("MultiHeadAttention output shape:", output.shape)
         return output
 
 
