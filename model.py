@@ -110,7 +110,8 @@ class ScaledDotProductAttention(nn.Module):
 
         if mask is not None:
             # Mask = 0 → set score to −∞ so softmax output ≈ 0
-            scores = scores.masked_fill(mask == False, float("-inf"))
+            scores = scores.masked_fill(mask == 0, float("-inf"))
+            print(scores)
 
 
         attn_w = F.softmax(scores, dim=-1)
