@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Optional
 import wandb
+import gdown
 
 from model       import Transformer, make_src_mask, make_tgt_mask, make_transformer
 from lr_scheduler import NoamScheduler
@@ -478,7 +479,7 @@ def load_checkpoint(
 
     epoch = ckpt.get("epoch", 0)
     print(f"  ✓ Checkpoint loaded ← {path}  (epoch {epoch})")
-    return epoch
+    return model, optimizer,scheduler, epoch
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -528,7 +529,7 @@ def infer_model_config_from_checkpoint(ckpt: dict) -> dict:
     return cfg
 
 
-def build_model_from_checkpoint(path: str, device: str) -> tuple[Transformer, int, dict]:
+def build_model_from_checkpoint(path: str, device: str, model) -> tuple[Transformer, int, dict]:
     """
     Load checkpoint metadata, instantiate the matching Transformer, and
     restore its weights.
@@ -536,7 +537,7 @@ def build_model_from_checkpoint(path: str, device: str) -> tuple[Transformer, in
     ckpt = torch.load(path, map_location="cpu")
     model_cfg = infer_model_config_from_checkpoint(ckpt)
 
-    model = make_transformer(**model_cfg).to(device)
+    
     epoch = load_checkpoint(path, model)
     model.to(device)
     model.eval()
@@ -864,6 +865,14 @@ def run_training_experiment(config: dict = None) -> None:
         **attn_kwargs,
     ).to(device)
 
+    try:
+        gdown.download(id="1n4xSZDXPk7u_192-0jNnhvN-kRPcOXnX", output=cfg["best_ckpt"], quiet=False)
+
+        model,_,_,_ = load_checkpoint(cfg['best_ckpt'], model)
+        print(f"  ✓ Loaded existing checkpoint from {cfg['best_ckpt']}")
+    except FileNotFoundError:
+        print(f"  No existing checkpoint found at {cfg['best_ckpt']}. Starting fresh.")
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters : {n_params:,}")
     wandb.log({"model/n_params": n_params})
@@ -884,6 +893,7 @@ def run_training_experiment(config: dict = None) -> None:
         d_model      = cfg["d_model"],
         warmup_steps = cfg["warmup_steps"],
     )
+
 
     # ── 7. Loss Function ──────────────────────────────────────────────
     loss_fn = LabelSmoothingLoss(

@@ -13,8 +13,9 @@ htmlcov/
 venv/
 env/
 
+mha_test.py
 # weights file
-.pt
+checkpoint.pt
 
 # Environment and local config
 .env
