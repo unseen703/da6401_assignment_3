@@ -852,6 +852,7 @@ def run_training_experiment(config: dict = None) -> None:
     if cfg["attn_type"] == "relative":
         attn_kwargs["max_rel_dist"] = 32
 
+    print("cfg:", cfg, "attn_kwargs:", attn_kwargs  )
     model = make_transformer(
         src_vocab_size = len(src_vocab),
         tgt_vocab_size = len(tgt_vocab),
@@ -865,7 +866,6 @@ def run_training_experiment(config: dict = None) -> None:
         pad_idx        = tgt_vocab.pad_idx,
         **attn_kwargs,
     ).to(device)
-
     try:
         gdown.download(id="1n4xSZDXPk7u_192-0jNnhvN-kRPcOXnX", output=cfg["best_ckpt"], quiet=False)
 

@@ -671,7 +671,7 @@ class Encoder(nn.Module):
         num_heads:  int,
         d_ff:       int,
         dropout:    float = 0.1,
-        max_len:    int   = 512,
+        max_len:    int   = 256,
         attn_type:  str   = "standard",
         **attn_kwargs,
     ) -> None:
@@ -783,7 +783,7 @@ class Decoder(nn.Module):
         num_heads:  int,
         d_ff:       int,
         dropout:    float = 0.1,
-        max_len:    int   = 512,
+        max_len:    int   = 256,
         attn_type:  str   = "standard",
         **attn_kwargs,
     ) -> None:
@@ -849,7 +849,7 @@ class Transformer(nn.Module):
         num_heads:  int   = 8,
         d_ff:       int   = 512,
         dropout:    float = 0.1,
-        max_len:    int   = 512,
+        max_len:    int   = 256,
         pad_idx:    int   = 0,
         attn_type:  str   = "standard",
         **attn_kwargs,
@@ -950,6 +950,7 @@ def make_transformer(
     """
     defaults = dict(d_model=256, N=5, num_heads=8, d_ff=512, dropout=0.1)
     file_path = "best_checkpoint.pt"
+    print(defaults)
     model = Transformer(
         src_vocab_size=src_vocab_size,
         tgt_vocab_size=tgt_vocab_size,
