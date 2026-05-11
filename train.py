@@ -838,7 +838,8 @@ def run_training_experiment(config: dict = None) -> None:
         src_min_freq = cfg["src_min_freq"],
         tgt_min_freq = cfg["tgt_min_freq"],
     )
-
+    print(src_vocab)
+    print(tgt_vocab)
     # ── Device ────────────────────────────────────────────────────────
     device = get_device()
     print(f"Device : {device}")
