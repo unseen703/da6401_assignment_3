@@ -451,7 +451,7 @@ def save_checkpoint(
 
 def load_checkpoint(
     path:      str,
-    model:     Transformer,
+    model: Transformer,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler  = None,
 ) -> int:

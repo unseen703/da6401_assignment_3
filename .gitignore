@@ -15,7 +15,7 @@ env/
 
 mha_test.py
 # weights file
-checkpoint.pt
+.pt
 
 # Environment and local config
 .env

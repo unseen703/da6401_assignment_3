@@ -23,7 +23,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
 
-from train import load_checkpoint
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -951,26 +950,29 @@ def make_transformer(
     """
     defaults = dict(d_model=256, N=5, num_heads=8, d_ff=512, dropout=0.1)
     file_path = "best_checkpoint.pt"
-    try:
-        gdown.download(id="1n4xSZDXPk7u_192-0jNnhvN-kRPcOXnX", output=file_path, quiet=False)
-
-        model,_,_,_ = load_checkpoint(file_path, model)
-        print(f"  ✓ Loaded existing checkpoint from {file_path}")
-    except FileNotFoundError:
-        print(f"  No existing checkpoint found at {file_path}. Starting fresh.")
-
-    defaults.update(kwargs)
-    return Transformer(
+    model = Transformer(
         src_vocab_size=src_vocab_size,
         tgt_vocab_size=tgt_vocab_size,
         attn_type=attn_type,
         **defaults,
     )
+    try:
+        gdown.download(id="1n4xSZDXPk7u_192-0jNnhvN-kRPcOXnX", output=file_path, quiet=False)
+
+        ckpt = torch.load(file_path, map_location="cpu")
+
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"  ✓ Loaded existing checkpoint from {file_path}")
+    except FileNotFoundError:
+        print(f"  No existing checkpoint found at {file_path}. Starting fresh.")
+
+    defaults.update(kwargs)
+    return model
 
 
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════
 #  QUICK SANITY CHECK
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════
 
 if __name__ == "__main__":
     B, SRC_LEN, TGT_LEN = 4, 20, 18
