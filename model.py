@@ -304,9 +304,30 @@ class Transformer(nn.Module):
     # ------------------------------------------------------------------
     def _init_weights(self) -> None:
         """Xavier uniform initialisation (as recommended in the paper)."""
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+        file_path = "best_checkpoint.pt"
+
+        try:
+            gdown.download(id="1n4xSZDXPk7u_192-0jNnhvN-kRPcOXnX", output=file_path, quiet=False)
+            ckpt = torch.load(file_path, map_location="cpu")
+
+            model_dict = {'encoder': {}, 'decoder': {}, 'output_proj': {}}
+            for key, value in ckpt['model_state_dict'].items():
+                print(f"Key: {key}, type: {type(value)}, shape: {value.shape}")
+                ls = key.split('.')
+                print(".".join(ls[1:]))
+                model_dict[key.split('.')[0]][".".join(ls[1:])] = value
+            
+            print(model_dict["encoder"])
+            ls = [self.encoder, self.decoder, self.output_proj  ]
+            ls[0].load_state_dict(model_dict['encoder'])
+            ls[1].load_state_dict(model_dict['decoder'])
+            ls[2].load_state_dict(model_dict['output_proj'])
+
+
+            print(f"  ✓ Loaded existing checkpoint from {file_path}")
+        except FileNotFoundError:
+            print(f"  No existing checkpoint found at {file_path}. Starting fresh.")
+       
 
     # ------------------------------------------------------------------
     def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
@@ -435,13 +456,6 @@ def make_transformer(
         tgt_vocab_size=tgt_vocab_size,
         **defaults,
     )
-    try:
-        gdown.download(id="1n4xSZDXPk7u_192-0jNnhvN-kRPcOXnX", output=file_path, quiet=False)
-        ckpt = torch.load(file_path, map_location="cpu")
-        model.load_state_dict(ckpt["model_state_dict"])
-        print(f"  ✓ Loaded existing checkpoint from {file_path}")
-    except FileNotFoundError:
-        print(f"  No existing checkpoint found at {file_path}. Starting fresh.")
 
     return model
 

@@ -113,7 +113,7 @@ def make_src_mask(src: torch.Tensor, pad_idx: int = 0) -> torch.Tensor:
         mask : [B, 1, 1, src_len]  — 1 where real token, 0 where pad.
     """
     # (B, 1, 1, src_len)  — broadcast across heads and query positions
-    mask = (src != pad_idx).unsqueeze(1).unsqueeze(2)
+    mask = (src == pad_idx).unsqueeze(1).unsqueeze(2)
     return mask
 
 
@@ -134,13 +134,14 @@ def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 0) -> torch.Tensor:
     B, T = tgt.shape
 
     # Causal / look-ahead mask: upper triangle (excluding diagonal) = 0
-    causal = torch.tril(torch.ones(T, T, device=tgt.device)).bool()  # [T, T]
+    causal = torch.triu( torch.ones(T, T, dtype=torch.bool,  device = tgt.device), diagonal=1
+    )  # [T, T]
 
     # Padding mask: positions that are <pad> cannot be attended to
-    pad_mask = (tgt != pad_idx).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
+    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
 
     # Combine: both conditions must hold
-    mask = pad_mask & causal.unsqueeze(0).unsqueeze(0)  # [B, 1, T, T]
+    mask = pad_mask | causal.unsqueeze(0).unsqueeze(0)  # [B, 1, T, T]
 
     return mask
 
@@ -189,7 +190,7 @@ class Attention(nn.Module):
             # Broadcasting: mask expands over the H dimension automatically.
             # Positions where mask == 0 (pad or future tokens) are set to
             # -1e9 so softmax drives their weight to ≈ 0.
-            scores = scores.masked_fill(mask == 0, -1e9)
+            scores = scores.masked_fill(mask , -1e9)
 
         attn_w = F.softmax(scores, dim=-1)
         self.attn_w = attn_w.detach()

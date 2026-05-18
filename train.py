@@ -419,7 +419,7 @@ def log_attention_maps(
         scores = scores / math.sqrt(d_k)
 
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, float("-inf"))
+            scores = scores.masked_fill(mask , -1e9)
 
         captured_attn["weights"] = F.softmax(scores, dim=-1).detach()
 
@@ -666,8 +666,9 @@ def run_ablation_no_scaling() -> None:
     def unscaled_forward(self, q, k, v, mask=None):
         scores = torch.matmul(q, k.transpose(-2, -1))   # NO /sqrt(d_k)
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, float("-inf"))
+            scores = scores.masked_fill(mask , -1e9)
         attn_w = F.softmax(scores, dim=-1)
+        
         return torch.matmul(attn_w, v), attn_w
 
     utils_module.Attention.forward = unscaled_forward
