@@ -276,14 +276,18 @@ class Transformer(nn.Module):
         dropout:    float = 0.1,
         max_len:    int   = 256,
         pad_idx:    int   = 0,
+        src_vocab = None, 
+        tgt_vocab = None,
     ) -> None:
         super().__init__()
 
-        train_loader, val_loader, test_loader, src_vocab, tgt_vocab = build_dataloaders(
-        batch_size   = 256,
-        src_min_freq = 2,
-        tgt_min_freq = 2,
-        )
+        if src_vocab is None or tgt_vocab is None:
+            train_loader, val_loader, test_loader, src_vocab, tgt_vocab = build_dataloaders(
+            batch_size   = 256,
+            src_min_freq = 2,
+            tgt_min_freq = 2,
+            )
+
         self.src_vocab = src_vocab
         self.tgt_vocab = tgt_vocab
         self.dataset = Multi30kDataset()
@@ -312,12 +316,10 @@ class Transformer(nn.Module):
 
             model_dict = {'encoder': {}, 'decoder': {}, 'output_proj': {}}
             for key, value in ckpt['model_state_dict'].items():
-                print(f"Key: {key}, type: {type(value)}, shape: {value.shape}")
                 ls = key.split('.')
-                print(".".join(ls[1:]))
                 model_dict[key.split('.')[0]][".".join(ls[1:])] = value
             
-            print(model_dict["encoder"])
+    
             ls = [self.encoder, self.decoder, self.output_proj  ]
             ls[0].load_state_dict(model_dict['encoder'])
             ls[1].load_state_dict(model_dict['decoder'])
@@ -405,7 +407,7 @@ class Transformer(nn.Module):
             + [self.src_vocab.eos_idx]
         )
 
-        src      = torch.tensor([indices], dtype=torch.long, device=device)
+        src = torch.tensor([indices], dtype=torch.long, device=device)
         src_mask = make_src_mask(src, pad_idx=self.pad_idx).to(device)
 
         # ── Greedy decode ──────────────────────────────────────────────
@@ -449,8 +451,7 @@ def make_transformer(
     """
     defaults = dict(d_model=256, N=5, num_heads=8, d_ff=512, dropout=0.1)
     defaults.update(kwargs)
-    file_path = "best_checkpoint.pt"
-    print(defaults)
+
     model = Transformer(
         src_vocab_size=src_vocab_size,
         tgt_vocab_size=tgt_vocab_size,
@@ -474,4 +475,4 @@ if __name__ == "__main__":
     model  = make_transformer(SRC_VOCAB, TGT_VOCAB)
     logits = model(src, tgt)
     nparams = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"logits: {tuple(logits.shape)}  params: {nparams:,}")
+    # print(f"logits: {tuple(logits.shape)}  params: {nparams:,}")

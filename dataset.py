@@ -132,6 +132,10 @@ class Multi30kDataset:
         # ── Load spaCy tokenisers ──────────────────────────────────────
         # Run once:  python -m spacy download de_core_news_sm
         #            python -m spacy download en_core_web_sm
+        spacy.cli.download("de_core_news_sm")
+    
+        # Download English model
+        spacy.cli.download("en_core_web_sm")        
         print("Loading spaCy models …")
         self.de_nlp = spacy.load("de_core_news_sm")
         self.en_nlp = spacy.load("en_core_web_sm")

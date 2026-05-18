@@ -317,7 +317,7 @@ def run_inference_experiment(config: dict = None) -> None:
     )
 
     device = get_device()
-    print(f"Device : {device}")
+
 
     print(f"\n══ Loading best checkpoint: {ckpt_path} ══")
     # Build a blank model from checkpoint config, then restore weights
@@ -511,11 +511,8 @@ def run_training_experiment(config: dict = None) -> None:
         src_min_freq = cfg["src_min_freq"],
         tgt_min_freq = cfg["tgt_min_freq"],
     )
-    print(src_vocab)
-    print(tgt_vocab)
-
+  
     device = get_device()
-    print(f"Device : {device}")
 
     print("\n══ Building Transformer ══")
     print("cfg:", cfg)
@@ -529,6 +526,8 @@ def run_training_experiment(config: dict = None) -> None:
         dropout        = cfg["dropout"],
         max_len        = cfg["max_len"],
         pad_idx        = tgt_vocab.pad_idx,
+        src_vocab      = src_vocab,
+        tgt_vocab      = tgt_vocab,
     ).to(device)
 
     print(model.infer("Ein Mann schläft auf einer Bank."))
@@ -640,7 +639,7 @@ def run_ablation_fixed_lr() -> None:
     )
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model     = make_transformer(len(src_vocab), len(tgt_vocab)).to(device)
+    model     = make_transformer(len(src_vocab), len(tgt_vocab), src_vocab=src_vocab, tgt_vocab=tgt_vocab).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     loss_fn   = LabelSmoothingLoss(len(tgt_vocab), tgt_vocab.pad_idx, 0.1)
 
@@ -668,7 +667,7 @@ def run_ablation_no_scaling() -> None:
         if mask is not None:
             scores = scores.masked_fill(mask , -1e9)
         attn_w = F.softmax(scores, dim=-1)
-        
+
         return torch.matmul(attn_w, v), attn_w
 
     utils_module.Attention.forward = unscaled_forward
