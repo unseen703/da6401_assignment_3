@@ -273,7 +273,7 @@ class Transformer(nn.Module):
         N:          int   = 5,
         num_heads:  int   = 8,
         d_ff:       int   = 512,
-        dropout:    float = 0.1,
+        dropout:    float = 0.12,
         max_len:    int   = 256,
         pad_idx:    int   = 0,
         src_vocab = None, 
@@ -311,7 +311,7 @@ class Transformer(nn.Module):
         file_path = "best_checkpoint.pt"
 
         try:
-            gdown.download(id="1djkagHUCHUHF7EbtUOkXuxGF0neO6-6M", output=file_path, quiet=False)
+            gdown.download(id="18srsu_2C8NSOWUbxxxwl1RSKbac0ufHG", output=file_path, quiet=False)
             ckpt = torch.load(file_path, map_location="cpu")
 
             model_dict = {'encoder': {}, 'decoder': {}, 'output_proj': {}}
