@@ -270,7 +270,7 @@ class Transformer(nn.Module):
         src_vocab_size: int = 7853,
         tgt_vocab_size: int = 5893,
         d_model:    int   = 256,
-        N:          int   = 5,
+        N:          int   = 4,
         num_heads:  int   = 8,
         d_ff:       int   = 512,
         dropout:    float = 0.11,
