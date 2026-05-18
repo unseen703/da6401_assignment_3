@@ -327,8 +327,11 @@ class Transformer(nn.Module):
 
 
             print(f"  ✓ Loaded existing checkpoint from {file_path}")
-        except FileNotFoundError:
-            print(f"  No existing checkpoint found at {file_path}. Starting fresh.")
+        except (FileNotFoundError, RuntimeError, gdown.exceptions.DownloadError) as e:
+            print(f"  No existing checkpoint found at {file_path}. Starting fresh. {e}, ")
+            for p in self.parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p)
        
 
     # ------------------------------------------------------------------
