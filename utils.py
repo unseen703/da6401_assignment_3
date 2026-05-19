@@ -496,3 +496,38 @@ def load_checkpoint(
     epoch = ckpt.get("epoch", 0)
     print(f"  ✓ Checkpoint loaded ← {path}  (epoch {epoch})")
     return model, optimizer, scheduler, epoch
+
+class LearnedPositionalEncoding(nn.Module):
+    """
+    Learned positional embeddings (alternative to sinusoidal PE).
+
+    Replaces the fixed sinusoidal table with a trainable nn.Embedding
+    of shape [max_len, d_model].  Position indices 0…T-1 are fed in
+    at forward time and added to the token embeddings exactly like the
+    sinusoidal version.
+
+    Section 2.4 — Positional Encoding vs. Learned Embeddings
+    ──────────────────────────────────────────────────────────
+    Key difference: sinusoidal PE can extrapolate to sequence lengths
+    longer than max_len seen during training (the formula is defined
+    for any position), while learned PE cannot — unseen positions have
+    no learned weight.
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 256) -> None:
+        super().__init__()
+        self.dropout   = nn.Dropout(dropout)
+        self.pos_embed = nn.Embedding(max_len, d_model)
+        nn.init.normal_(self.pos_embed.weight, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x : [B, T, d_model]
+        Returns:
+            x + learned position embedding  (same shape)
+        """
+        B, T, _ = x.shape
+        positions = torch.arange(T, device=x.device).unsqueeze(0)   # [1, T]
+        x = x + self.pos_embed(positions)
+        return self.dropout(x)

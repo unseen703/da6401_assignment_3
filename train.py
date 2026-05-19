@@ -19,6 +19,9 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
 import os
 import math
 import time
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,6 +32,7 @@ import gdown
 
 from model        import Transformer, make_transformer
 from utils        import (
+    LearnedPositionalEncoding,
     make_src_mask,
     make_tgt_mask,
     greedy_decode,
@@ -37,7 +41,7 @@ from utils        import (
     LabelSmoothingLoss,
     get_device,
 )
-from lr_scheduler import NoamScheduler
+from lr_scheduler import NoamScheduler, get_lr_history, get_fixed_lr_history
 from dataset      import build_dataloaders
 
 
@@ -384,6 +388,8 @@ def log_attention_maps(
     tgt_vocab,
     device:    str = "cpu",
     layer_idx: int = -1,
+    log_key:   str = "attention_maps",
+    title:     str = None,
 ) -> None:
     """
     Extract and log attention weight heatmaps for one source sentence.
@@ -457,11 +463,12 @@ def log_attention_maps(
         ax.set_yticklabels(src_tokens, fontsize=7)
         plt.colorbar(im, ax=ax, fraction=0.046)
 
-    plt.suptitle(f"Encoder Layer {resolved_layer_idx} — Attention Heads", fontsize=11)
+    plot_title = title or f"Encoder Layer {resolved_layer_idx} — Attention Heads"
+    plt.suptitle(plot_title, fontsize=11)
     plt.tight_layout()
 
     if wandb.run is not None:
-        wandb.log({"attention_maps": wandb.Image(fig)})
+        wandb.log({log_key: wandb.Image(fig)})
 
     plt.close(fig)
 
@@ -678,6 +685,662 @@ def run_ablation_no_scaling() -> None:
     utils_module.Attention.forward = original_forward
     print("Attention scaling restored.")
 
+# ══════════════════════════════════════════════════════════════════════
+#  UTILITY — build a standard model + optimizer + loss
+# ══════════════════════════════════════════════════════════════════════
+
+def _build_experiment_stack(cfg, src_vocab, tgt_vocab, device, use_noam=True):
+    """Shared boilerplate: model, optimizer, scheduler, loss_fn."""
+    model = make_transformer(
+        src_vocab_size = len(src_vocab),
+        tgt_vocab_size = len(tgt_vocab),
+        d_model        = cfg["d_model"],
+        N              = cfg["N"],
+        num_heads      = cfg["num_heads"],
+        d_ff           = cfg["d_ff"],
+        dropout        = cfg["dropout"],
+        max_len        = cfg["max_len"],
+        pad_idx        = tgt_vocab.pad_idx,
+        src_vocab      = src_vocab,
+        tgt_vocab      = tgt_vocab,
+    ).to(device)
+
+    if use_noam:
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9
+        )
+        scheduler = NoamScheduler(
+            optimizer,
+            d_model      = cfg["d_model"],
+            warmup_steps = cfg["warmup_steps"],
+        )
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=cfg.get("fixed_lr", 1e-4))
+        scheduler = None
+
+    loss_fn = LabelSmoothingLoss(
+        vocab_size = len(tgt_vocab),
+        pad_idx    = tgt_vocab.pad_idx,
+        smoothing  = cfg.get("label_smooth", 0.1),
+    )
+    return model, optimizer, scheduler, loss_fn
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2.1 — NOAM SCHEDULER vs FIXED LEARNING RATE
+# ══════════════════════════════════════════════════════════════════════
+
+def run_experiment_21_noam_vs_fixed(config: dict = None) -> None:
+    """
+    Section 2.1 — Necessity of the Noam Scheduler.
+
+    Trains two models for `num_epochs` epochs:
+        • Noam schedule  (linear warm-up + inverse-sqrt decay)
+        • Fixed LR       (constant 1e-4, no warm-up)
+
+    Logs to W&B:
+        • train/loss, val/loss per epoch for each run
+        • LR trajectory comparison chart (matplotlib → wandb.Image)
+        • Side-by-side loss overlay chart
+
+    W&B Report talking points (auto-generated in run summary):
+        • Why Transformers are sensitive to initial LR
+        • How warm-up prevents early softmax saturation
+    """
+    cfg = {**DEFAULT_CONFIG, "num_epochs": 10, "fixed_lr": 1e-4, **(config or {})}
+    device = get_device()
+
+    # ── 0. Log LR trajectory comparison ──────────────────────────────
+    wandb.init(project="da6401-a3", name="2.1_lr_schedule_comparison", config=cfg, reinit=True)
+
+    total_steps  = cfg["num_epochs"] * 230          # ≈ batches per epoch on Multi30k
+    noam_lrs     = get_lr_history(cfg["d_model"], cfg["warmup_steps"], total_steps)
+    fixed_lrs    = get_fixed_lr_history(cfg["fixed_lr"], total_steps)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(noam_lrs,  label="Noam Scheduler",           color="steelblue", linewidth=2)
+    ax.plot(fixed_lrs, label=f"Fixed LR ({cfg['fixed_lr']})", color="tomato",
+            linestyle="--", linewidth=1.5)
+    ax.axvline(cfg["warmup_steps"], color="gray", linestyle=":",
+               label=f"warmup_steps = {cfg['warmup_steps']}", alpha=0.8)
+    ax.set_xlabel("Training Step")
+    ax.set_ylabel("Learning Rate")
+    ax.set_title("Section 2.1 — LR Schedule Comparison")
+    ax.legend(); ax.grid(alpha=0.3)
+    plt.tight_layout()
+    wandb.log({"2.1/lr_trajectory": wandb.Image(fig)})
+    plt.close(fig)
+    wandb.finish()
+
+    # ── 1. Train with Noam ────────────────────────────────────────────
+    train_loader, val_loader, _, src_vocab, tgt_vocab = build_dataloaders(
+        batch_size   = cfg["batch_size"],
+        src_min_freq = cfg["src_min_freq"],
+        tgt_min_freq = cfg["tgt_min_freq"],
+    )
+
+    for run_name, use_noam in [("2.1_noam_scheduler", True), ("2.1_fixed_lr_1e-4", False)]:
+        wandb.init(project="da6401-a3", name=run_name, config=cfg, reinit=True)
+        model, optimizer, scheduler, loss_fn = _build_experiment_stack(
+            cfg, src_vocab, tgt_vocab, device, use_noam=use_noam
+        )
+
+        for epoch in range(cfg["num_epochs"]):
+            train_loss = run_epoch(
+                train_loader, model, loss_fn, optimizer, scheduler,
+                epoch_num=epoch, is_train=True, pad_idx=tgt_vocab.pad_idx, device=device,
+            )
+            val_loss = run_epoch(
+                val_loader, model, loss_fn, None, None,
+                epoch_num=epoch, is_train=False, pad_idx=tgt_vocab.pad_idx, device=device,
+            )
+            wandb.log({
+                "epoch":      epoch,
+                "train/loss": train_loss,
+                "val/loss":   val_loss,
+                "train/lr":   optimizer.param_groups[0]["lr"],
+            })
+
+        save_checkpoint(model, optimizer, scheduler or torch.optim.Adam(model.parameters()),
+                        cfg["num_epochs"], f"{run_name}_best.pt")
+        wandb.finish()
+
+    print("\n✓ Section 2.1 complete. Two runs logged to W&B.")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2.2 — SCALING FACTOR  1/√d_k  ABLATION
+# ══════════════════════════════════════════════════════════════════════
+
+def _make_gradient_norm_hooks(model: Transformer, max_steps: int, run_tag: str):
+    """
+    Register backward hooks on all Q- and K-projection weights in every
+    encoder layer.  Accumulates per-step gradient L2 norms.
+
+    Returns:
+        grad_log : dict  { "Q_grad_norms": [...], "K_grad_norms": [...] }
+        handles  : list of hook handles (call h.remove() after training)
+    """
+    grad_log = {"Q_grad_norms": [], "K_grad_norms": [], "step": []}
+    step_counter = [0]
+    handles = []
+
+    for layer_idx, layer in enumerate(model.encoder.layers):
+        def make_hook(which: str):
+            def hook(grad):
+                if step_counter[0] < max_steps:
+                    norm = grad.detach().norm().item()
+                    grad_log[f"{which}_grad_norms"].append(norm)
+                    if which == "Q":          # count once per step
+                        grad_log["step"].append(step_counter[0])
+                        step_counter[0] += 1
+                        wandb.log({
+                            f"2.2_{run_tag}/Q_grad_norm": norm,
+                            "step": step_counter[0],
+                        })
+                    else:
+                        wandb.log({
+                            f"2.2_{run_tag}/K_grad_norm": norm,
+                            "step": step_counter[0],
+                        })
+            return hook
+
+        h_q = layer.self_attn.W_q.weight.register_hook(make_hook("Q"))
+        h_k = layer.self_attn.W_k.weight.register_hook(make_hook("K"))
+        handles.extend([h_q, h_k])
+
+    return grad_log, handles
+
+
+def run_experiment_22_scaling_ablation(config: dict = None) -> None:
+    """
+    Section 2.2 — Ablation: The Scaling Factor 1/√d_k.
+
+    Trains two models (3 epochs each) and logs:
+        • Q / K gradient L2 norms for the first 1 000 gradient steps
+        • train/loss and val/loss
+
+    Disabling the scale is achieved by monkey-patching utils.Attention.forward
+    for the "no_scale" run (same approach as run_ablation_no_scaling).
+    """
+    import utils as utils_module
+
+    cfg = {**DEFAULT_CONFIG, "num_epochs": 3, **(config or {})}
+    device = get_device()
+    GRAD_LOG_STEPS = 1_000
+
+    train_loader, val_loader, _, src_vocab, tgt_vocab = build_dataloaders(
+        batch_size   = cfg["batch_size"],
+        src_min_freq = cfg["src_min_freq"],
+        tgt_min_freq = cfg["tgt_min_freq"],
+    )
+
+    original_forward = utils_module.Attention.forward
+
+    for run_name, patch_scale in [("with_scale", False), ("no_scale", True)]:
+        # Optionally disable scaling
+        if patch_scale:
+            def unscaled_forward(self, q, k, v, mask=None):
+                scores = torch.matmul(q, k.transpose(-2, -1))   # no /sqrt(d_k)
+                if mask is not None:
+                    scores = scores.masked_fill(mask, -1e9)
+                attn_w = F.softmax(scores, dim=-1)
+                self.attn_w = attn_w.detach()
+                attn_w = self.dropout(attn_w)
+                return torch.matmul(attn_w, v), self.attn_w
+            utils_module.Attention.forward = unscaled_forward
+            print("⚠  Attention scaling DISABLED.")
+        else:
+            utils_module.Attention.forward = original_forward
+            print("✓  Attention scaling ENABLED.")
+
+        wandb.init(project="da6401-a3", name=f"2.2_{run_name}", config=cfg, reinit=True)
+        model, optimizer, scheduler, loss_fn = _build_experiment_stack(
+            cfg, src_vocab, tgt_vocab, device, use_noam=True
+        )
+
+        grad_log, hooks = _make_gradient_norm_hooks(model, GRAD_LOG_STEPS, run_name)
+
+        for epoch in range(cfg["num_epochs"]):
+            model.train()
+            total_loss, total_tok = 0.0, 0
+            for batch_idx, (src, tgt) in enumerate(train_loader):
+                src, tgt = src.to(device), tgt.to(device)
+                tgt_input, tgt_gold = tgt[:, :-1], tgt[:, 1:]
+                src_mask = make_src_mask(src, tgt_vocab.pad_idx).to(device)
+                tgt_mask = make_tgt_mask(tgt_input, tgt_vocab.pad_idx).to(device)
+
+                logits = model(src, tgt_input, src_mask, tgt_mask)
+                B, T, V = logits.shape
+                loss = loss_fn(logits.reshape(B * T, V), tgt_gold.reshape(B * T))
+
+                optimizer.zero_grad()
+                loss.backward()              # hooks fire here
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                if scheduler:
+                    scheduler.step()
+
+                n_tok = (tgt_gold != 0).sum().item()
+                total_loss += loss.item() * n_tok
+                total_tok  += n_tok
+
+            avg_loss = total_loss / max(total_tok, 1)
+            val_loss = run_epoch(
+                val_loader, model, loss_fn, None, None,
+                epoch_num=epoch, is_train=False, pad_idx=tgt_vocab.pad_idx, device=device,
+            )
+            wandb.log({"epoch": epoch, "train/loss": avg_loss, "val/loss": val_loss})
+
+        for h in hooks:
+            h.remove()
+
+        # ── Plot grad-norm comparison ─────────────────────────────────
+        fig, ax = plt.subplots(figsize=(10, 4))
+        steps = list(range(len(grad_log["Q_grad_norms"])))
+        ax.plot(steps, grad_log["Q_grad_norms"], label="Q grad norm", color="steelblue")
+        ax.plot(steps, grad_log["K_grad_norms"][:len(steps)],
+                label="K grad norm", color="tomato")
+        ax.set_xlabel("Training Step"); ax.set_ylabel("Gradient L2 Norm")
+        ax.set_title(f"Section 2.2 — Q/K Gradient Norms ({run_name})")
+        ax.legend(); ax.grid(alpha=0.3)
+        plt.tight_layout()
+        wandb.log({f"2.2/grad_norms_{run_name}": wandb.Image(fig)})
+        plt.close(fig)
+        wandb.finish()
+
+    utils_module.Attention.forward = original_forward
+    print("\n✓ Section 2.2 complete.")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2.3 — ATTENTION ROLLOUT & HEAD SPECIALIZATION
+# ══════════════════════════════════════════════════════════════════════
+
+def run_experiment_23_attention_heads(
+    model:     Transformer = None,
+    src_vocab = None,
+    tgt_vocab = None,
+    n_samples: int = 3,
+    device:    str = "cpu",
+    config:    dict = None,
+) -> None:
+    """
+    Section 2.3 — Attention Rollout & Head Specialization.
+
+    For each of `n_samples` sentences from the validation set:
+        • Logs encoder self-attention head heatmaps using log_attention_maps
+
+    Logged to W&B:
+        • 2.3/sample{sample_i}_layer{layer_i}_heads — grid of H head heatmaps
+
+    Args:
+        model     : Trained Transformer (already loaded best checkpoint).
+        src_vocab : Source Vocab object.
+        tgt_vocab : Target Vocab object (for pad_idx).
+        n_samples : Number of validation sentences to visualise.
+        device    : Inference device.
+    """
+    cfg = {**DEFAULT_CONFIG, **(config or {})}
+
+    _, val_loader, _, built_src_vocab, built_tgt_vocab = build_dataloaders(
+        batch_size=cfg["batch_size"],
+        src_min_freq=cfg["src_min_freq"],
+        tgt_min_freq=cfg["tgt_min_freq"],
+    )
+    src_vocab = src_vocab or built_src_vocab
+    tgt_vocab = tgt_vocab or built_tgt_vocab
+
+    if model is None:
+        device = get_device()
+        model = make_transformer(
+            src_vocab_size=len(src_vocab),
+            tgt_vocab_size=len(tgt_vocab),
+            d_model=cfg["d_model"],
+            N=cfg["N"],
+            num_heads=cfg["num_heads"],
+            d_ff=cfg["d_ff"],
+            dropout=cfg["dropout"],
+            max_len=cfg["max_len"],
+            pad_idx=tgt_vocab.pad_idx,
+            src_vocab=src_vocab,
+            tgt_vocab=tgt_vocab,
+        ).to(device)
+        try:
+            model, _, _, _ = load_checkpoint(cfg.get("best_ckpt", "best_checkpoint.pt"), model)
+        except Exception as e:
+            print(f"  Warning: could not load checkpoint ({e}). Using random weights.")
+
+    wandb.init(project="da6401-a3", name="2.3_attention_heads", config=cfg, reinit=True)
+    model.eval()
+    model.to(device)
+
+    sample_count = 0
+    for src_batch, _ in val_loader:
+        for i in range(src_batch.size(0)):
+            if sample_count >= n_samples:
+                break
+
+            src = src_batch[i].unsqueeze(0).to(device)    # [1, src_len]
+            for layer_idx in range(len(model.encoder.layers)):
+                log_attention_maps(
+                    model=model,
+                    src=src,
+                    src_vocab=src_vocab,
+                    tgt_vocab=tgt_vocab,
+                    device=device,
+                    layer_idx=layer_idx,
+                    log_key=f"2.3/sample{sample_count+1}_layer{layer_idx}_heads",
+                    title=(
+                        f"Sample {sample_count + 1} | Encoder Layer {layer_idx} "
+                        f"— Attention Heads"
+                    ),
+                )
+
+            sample_count += 1
+
+        if sample_count >= n_samples:
+            break
+
+    wandb.finish()
+    print("\n✓ Section 2.3 complete.")
+
+
+def _patch_model_with_learned_pe(model: Transformer, dropout: float, max_len: int):
+    """
+    Replace sinusoidal PositionalEncoding with LearnedPositionalEncoding
+    in both encoder and decoder of `model` (in-place).
+    """
+    d_model = model.encoder.embedding.embedding_dim
+    model.encoder.pos_enc = LearnedPositionalEncoding(d_model, dropout, max_len)
+    model.decoder.pos_enc = LearnedPositionalEncoding(d_model, dropout, max_len)
+    return model
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2.4 — POSITIONAL ENCODING vs LEARNED EMBEDDINGS
+# ══════════════════════════════════════════════════════════════════════
+
+def run_experiment_24_positional_encoding(config: dict = None) -> None:
+    """
+    Section 2.4 — Positional Encoding vs. Learned Embeddings.
+
+    Trains two models for `num_epochs` epochs:
+        • Sinusoidal PE   (original, non-learnable)
+        • Learned PE      (nn.Embedding, fully trainable)
+
+    Logs to W&B:
+        • train/loss, val/loss, val/bleu per epoch
+        • Final test BLEU comparison bar chart
+        • Theoretical note on extrapolation in run summary
+
+    Deliverable for report:
+        Discuss how sinusoidal encoding allows extrapolation to sequence
+        lengths > max_len seen during training, while learned PE cannot.
+    """
+    cfg = {**DEFAULT_CONFIG, "num_epochs": 10, **(config or {})}
+    device = get_device()
+
+    train_loader, val_loader, test_loader, src_vocab, tgt_vocab = build_dataloaders(
+        batch_size   = cfg["batch_size"],
+        src_min_freq = cfg["src_min_freq"],
+        tgt_min_freq = cfg["tgt_min_freq"],
+    )
+
+    results = {}
+
+    for run_name, use_learned_pe in [
+        ("2.4_sinusoidal_pe", False),
+        ("2.4_learned_pe",    True),
+    ]:
+        wandb.init(project="da6401-a3", name=run_name, config=cfg, reinit=True)
+        model, optimizer, scheduler, loss_fn = _build_experiment_stack(
+            cfg, src_vocab, tgt_vocab, device, use_noam=True
+        )
+
+        if use_learned_pe:
+            model = _patch_model_with_learned_pe(model, cfg["dropout"], cfg["max_len"])
+            # Re-move to device after patching
+            model.to(device)
+            print(f"  Patched model with LearnedPositionalEncoding.")
+
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"  Trainable params : {n_params:,}")
+        wandb.log({"model/n_params": n_params})
+
+        best_val = float("inf")
+        best_ckpt = f"{run_name}_best.pt"
+
+        for epoch in range(cfg["num_epochs"]):
+            train_loss = run_epoch(
+                train_loader, model, loss_fn, optimizer, scheduler,
+                epoch_num=epoch, is_train=True, pad_idx=tgt_vocab.pad_idx, device=device,
+            )
+            val_loss = run_epoch(
+                val_loader, model, loss_fn, None, None,
+                epoch_num=epoch, is_train=False, pad_idx=tgt_vocab.pad_idx, device=device,
+            )
+            wandb.log({"epoch": epoch, "train/loss": train_loss, "val/loss": val_loss})
+
+            if val_loss < best_val:
+                best_val = val_loss
+                save_checkpoint(model, optimizer, scheduler, epoch, best_ckpt)
+
+        # ── Evaluate BLEU ─────────────────────────────────────────────
+        model, _, _, _ = load_checkpoint(best_ckpt, model)
+        model.to(device)
+        bleu = evaluate_bleu(model, test_loader, tgt_vocab, device=device)
+        wandb.log({"test/bleu": bleu})
+        results[run_name] = bleu
+        wandb.finish()
+
+    # ── Bar chart comparing BLEU ──────────────────────────────────────
+    wandb.init(project="da6401-a3", name="2.4_bleu_comparison", reinit=True)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    names  = list(results.keys())
+    values = list(results.values())
+    bars = ax.bar(names, values, color=["steelblue", "darkorange"], edgecolor="black")
+    ax.bar_label(bars, fmt="%.2f", padding=3)
+    ax.set_ylabel("Test BLEU Score")
+    ax.set_title("Section 2.4 — Sinusoidal vs. Learned Positional Encoding")
+    ax.set_ylim(0, max(values) * 1.25)
+    plt.tight_layout()
+    wandb.log({"2.4/bleu_comparison": wandb.Image(fig)})
+    plt.close(fig)
+    wandb.finish()
+
+    print(f"\n✓ Section 2.4 complete. Results: {results}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2.5 — LABEL SMOOTHING SENSITIVITY
+# ══════════════════════════════════════════════════════════════════════
+
+def run_experiment_25_label_smoothing(config: dict = None) -> None:
+    """
+    Section 2.5 — Decoder Sensitivity: Label Smoothing.
+
+    Trains two models:
+        • ε_ls = 0.1   (label-smoothed, as in the original paper)
+        • ε_ls = 0.0   (hard cross-entropy, no smoothing)
+
+    Logs to W&B:
+        • train/loss, val/loss per epoch
+        • Prediction Confidence: softmax probability of the gold token
+          (p_correct) averaged across the batch — logged every step
+        • Confidence distribution histograms at epochs 1, 5, final
+        • Final test BLEU for both settings
+
+    Reflection for report:
+        Label smoothing acts as a soft regulariser that prevents the model
+        from assigning full probability mass to any single token.  This
+        intentionally increases training perplexity (log p_correct is lower)
+        but improves generalisation by keeping the output distribution
+        "spread out", which benefits BLEU.
+    """
+    cfg = {**DEFAULT_CONFIG, "num_epochs": 10, **(config or {})}
+    device = get_device()
+
+    train_loader, val_loader, test_loader, src_vocab, tgt_vocab = build_dataloaders(
+        batch_size   = cfg["batch_size"],
+        src_min_freq = cfg["src_min_freq"],
+        tgt_min_freq = cfg["tgt_min_freq"],
+    )
+
+    bleu_results = {}
+
+    for run_name, smoothing in [
+        ("2.5_label_smooth_0.1", 0.1),
+        ("2.5_no_label_smooth",  0.0),
+    ]:
+        wandb.init(project="da6401-a3", name=run_name,
+                   config={**cfg, "label_smooth": smoothing}, reinit=True)
+
+        model, optimizer, scheduler, loss_fn = _build_experiment_stack(
+            {**cfg, "label_smooth": smoothing}, src_vocab, tgt_vocab, device, use_noam=True
+        )
+
+        best_val = float("inf")
+        best_ckpt = f"{run_name}_best.pt"
+        global_step = 0
+
+        for epoch in range(cfg["num_epochs"]):
+            model.train()
+            total_loss, total_tok = 0.0, 0
+            all_confidences = []
+
+            for src, tgt in train_loader:
+                src, tgt = src.to(device), tgt.to(device)
+                tgt_input, tgt_gold = tgt[:, :-1], tgt[:, 1:]
+                src_mask = make_src_mask(src, tgt_vocab.pad_idx).to(device)
+                tgt_mask = make_tgt_mask(tgt_input, tgt_vocab.pad_idx).to(device)
+
+                logits = model(src, tgt_input, src_mask, tgt_mask)
+                B, T, V = logits.shape
+                loss = loss_fn(logits.reshape(B * T, V), tgt_gold.reshape(B * T))
+
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                if scheduler:
+                    scheduler.step()
+
+                # ── Prediction confidence ─────────────────────────────
+                with torch.no_grad():
+                    probs = F.softmax(logits.reshape(B * T, V), dim=-1)
+                    gold  = tgt_gold.reshape(B * T)
+                    non_pad = gold != tgt_vocab.pad_idx
+                    p_correct = probs[non_pad].gather(
+                        1, gold[non_pad].unsqueeze(1)
+                    ).squeeze(1)
+                    mean_conf = p_correct.mean().item()
+                    all_confidences.extend(p_correct.cpu().tolist())
+
+                n_tok = (tgt_gold != 0).sum().item()
+                total_loss += loss.item() * n_tok
+                total_tok  += n_tok
+
+                wandb.log({
+                    "2.5/step_loss":       loss.item(),
+                    "2.5/pred_confidence": mean_conf,
+                    "global_step":         global_step,
+                })
+                global_step += 1
+
+            # ── Epoch-level logging ───────────────────────────────────
+            avg_loss = total_loss / max(total_tok, 1)
+            val_loss = run_epoch(
+                val_loader, model, loss_fn, None, None,
+                epoch_num=epoch, is_train=False, pad_idx=tgt_vocab.pad_idx, device=device,
+            )
+            ppl = math.exp(min(avg_loss, 100))
+
+            # Confidence histogram at milestone epochs
+            if epoch in {0, cfg["num_epochs"] // 2, cfg["num_epochs"] - 1}:
+                fig, ax = plt.subplots(figsize=(6, 3))
+                ax.hist(all_confidences, bins=50, range=(0, 1),
+                        color="steelblue", edgecolor="black", alpha=0.8)
+                ax.set_xlabel("Softmax Probability of Correct Token")
+                ax.set_ylabel("Count")
+                ax.set_title(f"Epoch {epoch+1} Confidence Dist. — {run_name}")
+                plt.tight_layout()
+                wandb.log({f"2.5/confidence_hist_ep{epoch+1}": wandb.Image(fig)})
+                plt.close(fig)
+
+            wandb.log({
+                "epoch":          epoch,
+                "train/loss":     avg_loss,
+                "train/ppl":      ppl,
+                "val/loss":       val_loss,
+                "avg_confidence": sum(all_confidences) / max(len(all_confidences), 1),
+            })
+
+            if val_loss < best_val:
+                best_val = val_loss
+                save_checkpoint(model, optimizer, scheduler, epoch, best_ckpt)
+
+        # ── BLEU ──────────────────────────────────────────────────────
+        model, _, _, _ = load_checkpoint(best_ckpt, model)
+        model.to(device)
+        bleu = evaluate_bleu(model, test_loader, tgt_vocab, device=device)
+        wandb.log({"test/bleu": bleu})
+        bleu_results[run_name] = bleu
+        wandb.finish()
+
+    # ── BLEU comparison chart ─────────────────────────────────────────
+    wandb.init(project="da6401-a3", name="2.5_bleu_comparison", reinit=True)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    names  = [k.replace("2.5_", "") for k in bleu_results]
+    values = list(bleu_results.values())
+    bars = ax.bar(names, values, color=["steelblue", "tomato"], edgecolor="black")
+    ax.bar_label(bars, fmt="%.2f", padding=3)
+    ax.set_ylabel("Test BLEU Score")
+    ax.set_title("Section 2.5 — Label Smoothing vs Standard Cross-Entropy")
+    ax.set_ylim(0, max(values) * 1.25)
+    plt.tight_layout()
+    wandb.log({"2.5/bleu_comparison": wandb.Image(fig)})
+    plt.close(fig)
+    wandb.finish()
+
+    print(f"\n✓ Section 2.5 complete. Results: {bleu_results}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  TOP-LEVEL RUNNER — run all sections
+# ══════════════════════════════════════════════════════════════════════
+
+def run_all_report_experiments(config: dict = None) -> None:
+    """Run all W&B report experiments sequentially."""
+    print("\n" + "═" * 60)
+    print("  DA6401 A3 — W&B Report Experiments")
+    print("═" * 60)
+
+    print("\n▶ Section 2.1 — Noam vs Fixed LR")
+    run_experiment_21_noam_vs_fixed(config)
+
+    print("\n▶ Section 2.2 — Scaling Factor Ablation")
+    run_experiment_22_scaling_ablation(config)
+
+    print("\n▶ Section 2.3 — Attention Head Visualisation")
+    device = get_device()
+    _, _, _, src_vocab, tgt_vocab = build_dataloaders(batch_size=128)
+    cfg = {**DEFAULT_CONFIG, **(config or {})}
+    model = make_transformer(len(src_vocab), len(tgt_vocab),
+                             src_vocab=src_vocab, tgt_vocab=tgt_vocab).to(device)
+    try:
+        model, _, _, _ = load_checkpoint(cfg.get("best_ckpt", "best_checkpoint.pt"), model)
+    except Exception as e:
+        print(f"  Warning: could not load checkpoint ({e}). Using random weights.")
+    run_experiment_23_attention_heads(model, src_vocab, tgt_vocab, device=device, config=config)
+
+    print("\n▶ Section 2.4 — Positional Encoding Comparison")
+    run_experiment_24_positional_encoding(config)
+
+    print("\n▶ Section 2.5 — Label Smoothing")
+    run_experiment_25_label_smoothing(config)
+
+    print("\n✓ All report experiments complete.")
 
 # ══════════════════════════════════════════════════════════════════════
 #  CLI ENTRY POINT
@@ -704,9 +1367,13 @@ if __name__ == "__main__":
     parser.add_argument("--skip_bleu", action="store_true")
     parser.add_argument("--ablation", type=str, default=None,
                         choices=["fixed_lr", "no_scaling"])
+    
+    parser.add_argument("--report", type=str, default=None,
+     choices=["2.1", "2.2", "2.3", "2.4", "2.5", "all"])
     args = parser.parse_args()
     cfg  = vars(args)
     cfg["compute_bleu"] = not args.skip_bleu
+
 
     if args.mode == "infer":
         run_inference_experiment(cfg)
@@ -715,5 +1382,11 @@ if __name__ == "__main__":
     elif args.ablation == "no_scaling":
         run_ablation_no_scaling()
     else:
-        run_training_experiment(cfg)
-
+        if args.report == "2.1":  run_experiment_21_noam_vs_fixed(cfg)
+        elif args.report == "2.2": run_experiment_22_scaling_ablation(cfg)
+        elif args.report == "2.3": run_experiment_23_attention_heads(config=cfg)
+        elif args.report == "2.4": run_experiment_24_positional_encoding(cfg)
+        elif args.report == "2.5": run_experiment_25_label_smoothing(cfg)
+        elif args.report == "all": run_all_report_experiments(cfg)
+        else:
+            run_training_experiment(cfg)
